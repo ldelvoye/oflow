@@ -38,6 +38,25 @@ ART_MAX_BYTES = 2 * 1024 * 1024
 
 
 @dataclass(frozen=True)
+class _Cover:
+    """One of the artwork sizes Spotify offers for an album."""
+
+    width: int
+    url: str
+
+
+@dataclass(frozen=True)
+class _CachedArt:
+    data: bytes
+    url: str
+
+
+# A url's bytes never change, so the last cover downloaded answers every later fetch of the same
+# track instead of pulling it again.
+_cached_art: _CachedArt | None = None
+
+
+@dataclass(frozen=True)
 class Track:
     track: str
     artists: tuple[str, ...]
@@ -275,13 +294,27 @@ def _album_name(track: dict[str, Any]) -> str:
 
 
 def _album_art_of(track: dict[str, Any], http: httpx.Client) -> bytes | None:
-    """Cover bytes for the now-playing track, or None on any failure — missing art must not
+    """Cover bytes for the now-playing track, or None on any failure: missing art must not
     break the tab.
     """
     url = _album_art_url(track)
     if url is None:
         return None
-    return _download_album_art(http, url)
+    global _cached_art
+    cached = _cached_art
+    if cached is not None and cached.url == url:
+        return cached.data
+    data = _download_album_art(http, url)
+    if data is None:
+        return None
+    _cached_art = _CachedArt(url=url, data=data)
+    return data
+
+
+def reset_album_art_cache() -> None:
+    """Drop the remembered cover. For tests only."""
+    global _cached_art
+    _cached_art = None
 
 
 def _album_art_url(track: dict[str, Any]) -> str | None:
@@ -291,7 +324,7 @@ def _album_art_url(track: dict[str, Any]) -> str | None:
     images = album.get("images")
     if not isinstance(images, list):
         return None
-    candidates: list[tuple[int, str]] = []
+    covers: list[_Cover] = []
     for image in images:
         if not isinstance(image, dict):
             continue
@@ -305,11 +338,17 @@ def _album_art_url(track: dict[str, Any]) -> str | None:
             size = width
         else:
             size = 0
-        candidates.append((size, url))
-    if not candidates:
+        covers.append(_Cover(width=size, url=url))
+    if not covers:
         return None
-    ranked = sorted(candidates, key=lambda item: (abs(item[0] - PREFERRED_ART_SIZE), -item[0]))
-    return ranked[0][1]
+    ranked = sorted(covers, key=_distance_from_preferred)
+    best = ranked[0]
+    return best.url
+
+
+def _distance_from_preferred(cover: _Cover) -> tuple[int, int]:
+    """Sort key: nearest to the preferred size first, the larger cover breaking a tie."""
+    return abs(cover.width - PREFERRED_ART_SIZE), -cover.width
 
 
 def _download_album_art(http: httpx.Client, url: str) -> bytes | None:

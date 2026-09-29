@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from io import BytesIO
 
+from PIL import Image
 from rich.color import Color
 from rich.style import Style
 from rich.text import Text
@@ -15,16 +16,8 @@ CELL_ASPECT = 0.5
 
 
 def image_to_ascii(data: bytes, width: int) -> Text | None:
-    """Colored ASCII art of `data`, `width` cells wide, or None if the bytes are not an image.
-
-    Pillow is imported lazily so a missing or broken install just turns the cover off rather than
-    crashing the tab (and lets the dependency be optional).
-    """
+    """Colored ASCII art of `data`, `width` cells wide, or None if the bytes are not an image."""
     if width < 1 or not data:
-        return None
-    try:
-        from PIL import Image
-    except ImportError:
         return None
     try:
         image = Image.open(BytesIO(data)).convert("RGB")

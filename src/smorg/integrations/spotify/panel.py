@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import webbrowser
+from dataclasses import dataclass
 
 from rich.text import Text
 from textual import events
@@ -35,10 +36,18 @@ _ROW_INDENT = "      "
 _PLAY_NOW_PLACEHOLDER = "play now — search (not implemented yet)"
 _ADD_TO_QUEUE_PLACEHOLDER = "add to queue — search (not implemented yet)"
 
-# Square cover at this cell width is about 32 rows, which sits beside the queue.
 _ART_WIDTH = 64
 # Hide the cover when the tab is too narrow for the queue and the art together.
 _ART_MIN_PANEL_WIDTH = 100
+
+
+@dataclass(frozen=True)
+class _ArtRender:
+    """The last cover painted, reused until the art or the column width changes."""
+
+    data: bytes
+    width: int
+    text: Text
 
 
 def _format_artists(artists: tuple[str, ...]) -> str:
@@ -123,8 +132,7 @@ class SpotifyPanel(Panel):
 
     def __init__(self) -> None:
         super().__init__()
-        # (bytes, width, rendered) so the last cover is reused until the track or width changes.
-        self._art_render: tuple[bytes, int, Text] | None = None
+        self._art_render: _ArtRender | None = None
 
     def compose(self) -> ComposeResult:
         yield from super().compose()
@@ -183,14 +191,12 @@ class SpotifyPanel(Panel):
             return None
         width = self._art_width()
         cached = self._art_render
-        if cached is not None:
-            cached_data, cached_width, cached_text = cached
-            if cached_width == width and cached_data == data:
-                return cached_text
+        if cached is not None and cached.width == width and cached.data == data:
+            return cached.text
         rendered = image_to_ascii(data, width)
         if rendered is None:
             return None
-        self._art_render = (data, width, rendered)
+        self._art_render = _ArtRender(data=data, width=width, text=rendered)
         return rendered
 
     def _render_album_art(self) -> Text:

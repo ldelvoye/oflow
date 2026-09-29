@@ -13,7 +13,7 @@ import pytest
 
 from smorg.auth.store import Credentials
 from smorg.core.contract import AccessNotAllowed, AuthExpired, Malformed, Unavailable
-from smorg.integrations.spotify.source import fetch
+from smorg.integrations.spotify.source import ART_MAX_BYTES, fetch, reset_album_art_cache
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PLAYER = json.loads((FIXTURES / "spotify_player.json").read_text())
@@ -41,6 +41,7 @@ class _Server:
         self._queue: tuple[int, object] = (200, EMPTY_QUEUE)
         self._recently_played: tuple[int, object] = (200, EMPTY_RECENTLY_PLAYED)
         self._playlists: dict[str, tuple[int, object]] = {}
+        self._art: dict[str, tuple[int, bytes]] = {}
 
     def playing(self, payload: dict, status: int = 200) -> None:
         self._player = (status, payload)
@@ -60,9 +61,16 @@ class _Server:
     def playlist(self, playlist_id: str, payload: dict, status: int = 200) -> None:
         self._playlists[playlist_id] = (status, payload)
 
+    def art(self, url: str, content: bytes, status: int = 200) -> None:
+        self._art[url] = (status, content)
+
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         path = request.url.path
+        art = self._art.get(str(request.url))
+        if art is not None:
+            status, content = art
+            return httpx.Response(status, content=content)
         if path == "/v1/me/player":
             status, payload = self._player
             if payload is None:
@@ -85,6 +93,7 @@ class _Server:
 
 @pytest.fixture
 def server() -> _Server:
+    reset_album_art_cache()
     return _Server()
 
 
@@ -284,6 +293,109 @@ def test_last_played_carries_the_track_and_when_it_played(server):
     assert last_played.track.track == "Do I Wanna Know?"
     assert last_played.track.artists == ("Arctic Monkeys",)
     assert last_played.played_at == datetime(2026, 8, 20, 11, 30, tzinfo=UTC)
+
+
+# --- Album art ---
+
+
+def cover_url(width: int) -> str:
+    return f"https://i.scdn.co/image/cover-{width}"
+
+
+def cover(width: int) -> dict:
+    return {"url": cover_url(width), "width": width, "height": width}
+
+
+def playing_with_covers(*images: dict) -> dict:
+    album = PLAYER["item"]["album"] | {"images": list(images)}
+    item = PLAYER["item"] | {"album": album}
+    return PLAYER | {"item": item}
+
+
+@pytest.mark.parametrize(
+    ("offered", "chosen"),
+    [
+        ((64, 300, 640), 300),
+        ((64, 640), 64),
+        # Equally far either way, so the larger cover wins.
+        ((200, 400), 400),
+    ],
+)
+def test_the_cover_nearest_300_cells_is_the_one_downloaded(server, offered, chosen):
+    """Only the chosen url is registered: reaching for any other one fails the request."""
+    images = [cover(width) for width in offered]
+    payload = playing_with_covers(*images)
+    server.playing(payload)
+    server.art(cover_url(chosen), b"the-chosen-cover")
+
+    now_playing = fetch_with(server).now_playing
+
+    assert now_playing is not None
+    assert now_playing.album_art == b"the-chosen-cover"
+
+
+def test_a_cover_offered_over_plain_http_is_never_fetched(server):
+    insecure = {"url": "http://i.scdn.co/image/cover-300", "width": 300, "height": 300}
+    payload = playing_with_covers(insecure)
+    server.playing(payload)
+
+    now_playing = fetch_with(server).now_playing
+
+    assert now_playing is not None
+    assert now_playing.album_art is None
+
+
+def test_a_track_that_offers_no_covers_plays_without_art(server):
+    server.playing(PLAYER)
+
+    now_playing = fetch_with(server).now_playing
+
+    assert now_playing is not None
+    assert now_playing.album_art is None
+
+
+@pytest.mark.parametrize(
+    ("status", "content"),
+    [(404, b""), (200, b""), (200, b"x" * (ART_MAX_BYTES + 1))],
+)
+def test_a_cover_that_does_not_arrive_whole_leaves_the_track_without_art(server, status, content):
+    payload = playing_with_covers(cover(300))
+    server.playing(payload)
+    server.art(cover_url(300), content, status=status)
+
+    now_playing = fetch_with(server).now_playing
+
+    assert now_playing is not None
+    assert now_playing.album_art is None
+
+
+def test_refetching_the_same_track_reuses_the_downloaded_cover(server):
+    payload = playing_with_covers(cover(300))
+    server.playing(payload)
+    server.art(cover_url(300), b"the-cover")
+
+    fetch_with(server)
+    now_playing = fetch_with(server).now_playing
+
+    assert now_playing is not None
+    assert now_playing.album_art == b"the-cover"
+    downloads = [request for request in server.requests if request.url.host == "i.scdn.co"]
+    assert len(downloads) == 1
+
+
+def test_a_track_with_a_different_cover_url_downloads_again(server):
+    first_payload = playing_with_covers(cover(300))
+    server.playing(first_payload)
+    server.art(cover_url(300), b"the-first-cover")
+    fetch_with(server)
+
+    second_payload = playing_with_covers(cover(301))
+    server.playing(second_payload)
+    server.art(cover_url(301), b"the-second-cover")
+    now_playing = fetch_with(server).now_playing
+
+    assert now_playing is not None
+    assert now_playing.album_art == b"the-second-cover"
 
 
 # --- Sanitization and url validity (shared helpers, exercised through the now-playing path) ---
