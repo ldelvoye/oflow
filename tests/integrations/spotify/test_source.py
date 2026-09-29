@@ -357,6 +357,7 @@ def test_a_track_that_offers_no_covers_plays_without_art(server):
 @pytest.mark.parametrize(
     ("status", "content"),
     [(404, b""), (200, b""), (200, b"x" * (ART_MAX_BYTES + 1))],
+    ids=["missing", "empty", "oversized"],
 )
 def test_a_cover_that_does_not_arrive_whole_leaves_the_track_without_art(server, status, content):
     payload = playing_with_covers(cover(300))
