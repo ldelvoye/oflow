@@ -33,6 +33,28 @@ LAST_PLAYED_LIMIT = 1
 # Where "o" opens when nothing is loaded on the player at all.
 FALLBACK_URL = "https://open.spotify.com"
 
+PREFERRED_ART_SIZE = 300
+ART_MAX_BYTES = 2 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _Cover:
+    """One of the artwork sizes Spotify offers for an album."""
+
+    width: int
+    url: str
+
+
+@dataclass(frozen=True)
+class _CachedArt:
+    data: bytes
+    url: str
+
+
+# A url's bytes never change, so the last cover downloaded answers every later fetch of the same
+# track instead of pulling it again.
+_cached_art: _CachedArt | None = None
+
 
 @dataclass(frozen=True)
 class Track:
@@ -50,6 +72,8 @@ class NowPlaying:
     context_kind: str
     # None when there is nothing to name (autoplay, or a name that could not be resolved).
     context_name: str | None
+    # Cover JPEG/PNG bytes, or None when Spotify omitted images or the download failed.
+    album_art: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -140,11 +164,13 @@ def _fetch_now_playing(credentials: Credentials, http: httpx.Client) -> NowPlayi
         raise Malformed(f"'item' was {type(item).__name__}, expected an object")
     track = _track_of(item)
     context_kind, context_name = _context_of(payload.get("context"), track, credentials, http)
+    album_art = _album_art_of(item, http)
     return NowPlaying(
         track=track,
         is_playing=_is_playing_of(payload),
         context_kind=context_kind,
         context_name=context_name,
+        album_art=album_art,
     )
 
 
@@ -265,3 +291,74 @@ def _album_name(track: dict[str, Any]) -> str:
     if not isinstance(album, dict):
         raise Malformed(f"'album' was {type(album).__name__}, expected an object")
     return required_string(album, "name")
+
+
+def _album_art_of(track: dict[str, Any], http: httpx.Client) -> bytes | None:
+    """Cover bytes for the now-playing track, or None on any failure: missing art must not
+    break the tab.
+    """
+    url = _album_art_url(track)
+    if url is None:
+        return None
+    global _cached_art
+    cached = _cached_art
+    if cached is not None and cached.url == url:
+        return cached.data
+    data = _download_album_art(http, url)
+    if data is None:
+        return None
+    _cached_art = _CachedArt(url=url, data=data)
+    return data
+
+
+def reset_album_art_cache() -> None:
+    """Drop the remembered cover. For tests only."""
+    global _cached_art
+    _cached_art = None
+
+
+def _album_art_url(track: dict[str, Any]) -> str | None:
+    album = track.get("album")
+    if not isinstance(album, dict):
+        return None
+    images = album.get("images")
+    if not isinstance(images, list):
+        return None
+    covers: list[_Cover] = []
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        url = image.get("url")
+        if not isinstance(url, str):
+            continue
+        if urlsplit(url).scheme != "https":
+            continue
+        width = image.get("width")
+        if isinstance(width, int):
+            size = width
+        else:
+            size = 0
+        covers.append(_Cover(width=size, url=url))
+    if not covers:
+        return None
+    ranked = sorted(covers, key=_distance_from_preferred)
+    best = ranked[0]
+    return best.url
+
+
+def _distance_from_preferred(cover: _Cover) -> tuple[int, int]:
+    """Sort key: nearest to the preferred size first, the larger cover breaking a tie."""
+    return abs(cover.width - PREFERRED_ART_SIZE), -cover.width
+
+
+def _download_album_art(http: httpx.Client, url: str) -> bytes | None:
+    try:
+        response = http.get(url)
+    except httpx.HTTPError:
+        return None
+    if response.status_code != 200:
+        return None
+    content = response.content
+    if not content or len(content) > ART_MAX_BYTES:
+        return None
+    return content

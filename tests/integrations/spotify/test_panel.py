@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Input
+from textual.widgets import Input, Static
 
 from smorg.integrations.spotify.panel import SpotifyPanel
 from smorg.integrations.spotify.source import (
@@ -33,6 +33,7 @@ def now_playing(
     context_kind: str = "album",
     context_name: str | None = "Hot Fuss",
     playing_track: Track | None = None,
+    album_art: bytes | None = None,
 ) -> NowPlaying:
     chosen_track = playing_track if playing_track is not None else track()
     return NowPlaying(
@@ -40,6 +41,7 @@ def now_playing(
         is_playing=is_playing,
         context_kind=context_kind,
         context_name=context_name,
+        album_art=album_art,
     )
 
 
@@ -297,6 +299,41 @@ async def test_escape_closes_the_search_strip_and_returns_focus_to_the_panel():
         assert search.display is False
         assert search.value == ""
         assert panel.has_focus
+
+
+# --- The album art column ---
+
+
+@pytest.mark.asyncio
+async def test_a_wide_tab_draws_the_cover(png):
+    panel = panel_with(state(now_playing(album_art=png())))
+    harness = _SpotifyPanelHarness(panel)
+    async with harness.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+
+        assert panel.query_one("#album-art", Static).display is True
+        assert panel._render_album_art().plain != ""
+
+
+@pytest.mark.asyncio
+async def test_a_tab_too_narrow_for_the_queue_and_the_cover_hides_the_cover(png):
+    """The art is docked beside the queue, so a narrow tab has to give the rows the room."""
+    panel = panel_with(state(now_playing(album_art=png())))
+    harness = _SpotifyPanelHarness(panel)
+    async with harness.run_test(size=(80, 40)) as pilot:
+        await pilot.pause()
+
+        assert panel.query_one("#album-art", Static).display is False
+
+
+@pytest.mark.asyncio
+async def test_a_track_with_no_cover_leaves_the_column_hidden():
+    panel = panel_with(state(now_playing()))
+    harness = _SpotifyPanelHarness(panel)
+    async with harness.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+
+        assert panel.query_one("#album-art", Static).display is False
 
 
 @pytest.mark.asyncio
